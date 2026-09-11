@@ -53,6 +53,23 @@ Design traps encountered (worth remembering):
 - With the cap too high, simply closing the gripper pinches the cap and "wins" without moving the arm — a reward hack.
 - Spring stiffness must be strong enough to hold the cap's weight (sag ≪ travel) but weak enough for the arm to press.
 
+## Training (PPO from scratch)
+
+`train.py` + `rl/` implement PPO (clipped objective, GAE, 2x128 MLP Gaussian policy, value baseline) with 8 parallel CPU env workers over pipes, thread pinning, a RAM cap, checkpointing, and periodic evaluation.
+
+```sh
+source scripts/vulkan_env.sh
+uv run python train.py --total-steps 512000 --num-workers 8 --rollout-steps 128 \
+  --eval-every 20 --eval-episodes 20 \
+  --snapshot-iters "1,2,3,4,5,6,8,10,15,20,30,40,60,80,120,200,300,500"
+
+uv run python scripts/plot_learning.py --log outputs/train_log.csv
+uv run python scripts/make_progression.py
+uv run python scripts/eval_policy.py --checkpoint outputs/checkpoints/best.pt
+```
+
+Result on M1 Max: first successful presses appear around iteration 6 (~6k steps); eval success hits 10/10 by iteration 20 (~20k steps / 0.3 min); trained policy presses in 3 control steps. Full 512k-step run takes ~5 min wall-clock, ~4 GB RAM.
+
 ## Measured on M1 Max (32 GB, CPU sim, state obs)
 
 | Setup | Throughput |
@@ -67,6 +84,6 @@ Implication: 2M PPO steps ≈ 5 min of raw simulation, ≈ 15-30 min wall-clock 
 
 1. ~~Sanity render + throughput benchmark on Mac~~
 2. ~~Custom `ResetButton-v1` env (fixed button, shaped reward)~~
-3. PPO from scratch, 2x128 MLP
+3. ~~PPO from scratch, 2x128 MLP~~
 4. Button position randomization
 5. Record early-vs-trained demo

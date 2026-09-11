@@ -1,0 +1,15 @@
+[project]
+name = "reset-codex-button"
+version = "0.1.0"
+description = "Train a Franka arm to press a RESET button with PPO"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "mani-skill-nightly",
+    "torch",
+    "imageio[ffmpeg]",
+    "tqdm",
+]
+
+[tool.uv]
+package = false

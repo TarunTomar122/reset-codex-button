@@ -90,6 +90,8 @@ def main():
     p.add_argument("--max-steps", type=int, default=100)
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--stride", type=int, default=1)
+    p.add_argument("--fast-stride", type=int, default=5)
+    p.add_argument("--fast-until-iter", type=int, default=5)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("-o", "--output", default="outputs/videos/training_progression.mp4")
     args = p.parse_args()
@@ -141,11 +143,13 @@ def main():
             episode_frames.append(to_numpy_frame(env.render()))
         success = bool(info["success"][0]) if "success" in info else False
         status = "PRESSED" if success else "not pressed"
-        for frame in episode_frames[:: args.stride]:
+        stride = args.fast_stride if it <= args.fast_until_iter else args.stride
+        speed_note = f"  ({stride}x speed)" if stride > 1 else ""
+        for frame in episode_frames[::stride]:
             frames.append(
                 label_frame(
                     frame,
-                    f"PPO iteration {it}  -  {ckpt['steps'] // 1000}k steps",
+                    f"PPO iteration {it}  -  {ckpt['steps'] // 1000}k steps{speed_note}",
                     f"button {status}  ({steps} sim steps)",
                     ok=success,
                 )

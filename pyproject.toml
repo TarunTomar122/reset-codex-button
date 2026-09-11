@@ -9,6 +9,7 @@ dependencies = [
     "torch",
     "imageio[ffmpeg]",
     "tqdm",
+    "pin>=4.1.0",
 ]
 
 [tool.uv]

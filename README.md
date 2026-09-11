@@ -4,6 +4,16 @@ Train a simulated Franka arm to press a big spring-loaded **RESET** button so Ti
 
 Learning project: RL from scratch — custom ManiSkill env, PPO with a small MLP, domain randomization, demo video ("Tibo has been automated").
 
+## Results
+
+PPO written from scratch learns to press the button in **~0.3 minutes** of training (20k steps). Early iterations flail until the 100-step timeout; the first press lands at iteration 6, and by iteration 30 the policy presses in **3 control steps**. Full 512k-step run: ~5 minutes on an M1 Max CPU, no GPU.
+
+![training progression](media/training_progression.gif)
+
+Full-quality video: [training progression (mp4)](media/training_progression.mp4) · [scripted oracle (mp4)](media/oracle_press.mp4)
+
+![PPO learning curve](media/learning_curve.png)
+
 ## Stack
 
 - [ManiSkill 3](https://maniskill.ai) / SAPIEN (CPU simulation on macOS via MoltenVK)

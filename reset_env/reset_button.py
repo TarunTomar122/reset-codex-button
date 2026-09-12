@@ -639,3 +639,61 @@ class ResetButtonStrongCurriculumEnv(ResetButtonCurriculumEnv):
 @register_env("ResetButton-v12", max_episode_steps=250)
 class ResetButtonBalancedCurriculumEnv(ResetButtonStrongCurriculumEnv):
     blue_start_frac = 0.5
+
+
+@register_env("ResetButton-v13", max_episode_steps=250)
+class ResetButtonStrictRewardOrderEnv(ResetButtonBalancedCurriculumEnv):
+    red_bonus_after_blue = 20.0
+    red_penalty_before_blue = 5.0
+    red_approach_weight = 0.0
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        if not hasattr(self, "prev_dep_blue"):
+            self.prev_dep_blue = self._depression().detach().clone()
+            self.prev_dep_red = self._depression_red().detach().clone()
+        tcp = self.agent.tcp_pose.p
+        dist_blue = torch.linalg.norm(self._button_top() - tcp, axis=1)
+        dist_red = torch.linalg.norm(self._button_top_red() - tcp, axis=1)
+        blue_done = info["blue_done"]
+        dep_blue = self._depression()
+        dep_red = self._depression_red()
+        centered_blue = info["centered_blue"].float()
+        centered_red = info["centered_red"].float()
+        blue_weight = torch.where(
+            blue_done,
+            torch.zeros_like(dist_blue),
+            torch.full_like(dist_blue, self.approach_weight),
+        )
+        red_weight = torch.where(
+            blue_done,
+            torch.full_like(dist_red, self.red_approach_weight_after_blue),
+            torch.full_like(dist_red, self.red_approach_weight),
+        )
+        reward = blue_weight * (self.prev_dist - dist_blue)
+        reward += red_weight * (self.prev_dist_red - dist_red)
+        reward += (
+            self.press_shaping_weight
+            * (dep_blue - self.prev_dep_blue)
+            * centered_blue
+            * (~blue_done).float()
+        )
+        reward += (
+            self.press_shaping_weight
+            * (dep_red - self.prev_dep_red)
+            * centered_red
+            * blue_done.float()
+        )
+        reward += self.blue_bonus * info["newly_blue"].float()
+        red_bonus = torch.where(
+            blue_done,
+            torch.full_like(dist_red, self.red_bonus_after_blue),
+            torch.full_like(dist_red, -self.red_penalty_before_blue),
+        )
+        reward += red_bonus * info["newly_red"].float()
+        if action is not None:
+            reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist_blue.clone()
+        self.prev_dist_red = dist_red.clone()
+        self.prev_dep_blue = dep_blue.detach().clone()
+        self.prev_dep_red = dep_red.detach().clone()
+        return reward

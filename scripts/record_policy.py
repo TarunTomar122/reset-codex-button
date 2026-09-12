@@ -110,7 +110,14 @@ def main():
             512,
             [
                 ("Trained policy - random button positions", 24),
-                ("PPO from scratch - 431k steps - 4 minutes on Mac", 17),
+                (
+                    ckpt.get("label")
+                    or (
+                        f"PPO from scratch - {ckpt['steps'] // 1000}k steps - "
+                        f"iteration {ckpt['iteration']}"
+                    ),
+                    17,
+                ),
             ],
         )
     ] * int(1.5 * args.fps)

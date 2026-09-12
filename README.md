@@ -108,6 +108,26 @@ Trade-off learned: curriculum is a dial, not a fix — 70% favors the second sta
 
 Full-quality video: [fingertip order policy (mp4)](media/finger_order_policy.mp4)
 
+### The pipeline that actually solved it: demos → BC → RL → DAgger
+
+From-scratch PPO plateaued at 66–70%. The standard robotics recipe — imitate first, polish with RL, then iterate with DAgger — reached **96%**:
+
+| stage | seeded 50-episode success | steps per success |
+|---|---|---|
+| PPO from scratch (best, v11) | 66% | ~33 |
+| scripted oracle (ceiling check) | 100% on eval seeds | ~55 |
+| behavior cloning (36.7k oracle transitions) | 76% | 87 |
+| + PPO fine-tune (~450k steps) | 88% | 20.6 |
+| + DAgger round (9.6k oracle-labeled states) then PPO fine-tune (~287k steps) | **96%** | 29.5 |
+
+Tools: `scripts/generate_demos.py` (oracle → npz), `scripts/train_bc.py` (supervised), `scripts/dagger.py` (policy drives, oracle labels), `train.py --init-checkpoint` (RL fine-tune).
+
+Why it works: demonstrations delete the discovery problem (the reason v8/v9 scored 0% — the arm never found the red press). RL then only has to polish timing and recoveries, so it converges in a few hundred thousand steps instead of millions. DAgger specifically fixes imitation's distribution-shift weakness (the policy's own mistakes never appear in demos).
+
+![imitation + RL policy](media/imitation_rl_policy.gif)
+
+Full-quality video: [imitation + RL policy (mp4)](media/imitation_rl_policy.mp4)
+
 ## Training (PPO from scratch)
 
 `train.py` + `rl/` implement PPO (clipped objective, GAE, 2x128 MLP Gaussian policy, value baseline) with 8 parallel CPU env workers over pipes, thread pinning, a RAM cap, checkpointing, and periodic evaluation.

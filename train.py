@@ -43,6 +43,7 @@ def parse_args():
     p.add_argument("--qpos-noise", type=float, default=0.02)
     p.add_argument("--stop-at-success", type=float, default=1.01)
     p.add_argument("--snapshot-iters", default="")
+    p.add_argument("--init-checkpoint", default="")
     p.add_argument("--output-dir", default="outputs")
     return p.parse_args()
 
@@ -180,6 +181,10 @@ def main():
 
     policy = GaussianPolicy(obs_dim, act_dim)
     value = ValueNet(obs_dim)
+    if args.init_checkpoint:
+        init = torch.load(args.init_checkpoint, weights_only=False)
+        policy.load_state_dict(init["policy"])
+        print(f"initialized policy from {args.init_checkpoint}", flush=True)
     params = list(policy.parameters()) + list(value.parameters())
     optimizer = torch.optim.Adam(params, lr=args.lr, eps=1e-5)
 

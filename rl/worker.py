@@ -21,7 +21,7 @@ def flat_obs(obs):
 
 
 class EnvWorker:
-    def __init__(self, env_id, seed):
+    def __init__(self, env_id, seed, qpos_noise=0.02):
         torch.set_num_threads(1)
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -31,6 +31,7 @@ class EnvWorker:
             num_envs=1,
             sim_backend="cpu",
             render_mode=None,
+            robot_init_qpos_noise=qpos_noise,
         )
         obs, _ = self.env.reset(seed=seed)
         self.obs = flat_obs(obs)
@@ -47,6 +48,8 @@ class EnvWorker:
         done_buf = np.zeros(steps, dtype=np.float32)
         ep_returns = []
         ep_successes = 0
+        ep_red_first = 0
+        ep_blue_only = 0
         ep_count = 0
         ep_return = 0.0
         with torch.no_grad():
@@ -57,7 +60,18 @@ class EnvWorker:
                 logp = dist.log_prob(action).sum(-1)
                 action_env = action.clamp(-1.0, 1.0).numpy().reshape(1, -1)
                 next_obs, reward, terminated, truncated, info = self.env.step(action_env)
-                success = bool(info["success"][0]) if "success" in info else False
+                if "order_success" in info:
+                    success = bool(info["order_success"][0])
+                    red_first = bool(info["red_first"][0])
+                    blue_only = (
+                        bool(truncated[0])
+                        and bool(info["blue_done"][0])
+                        and not bool(info["red_now"][0])
+                    )
+                else:
+                    success = bool(info["success"][0]) if "success" in info else False
+                    red_first = False
+                    blue_only = False
                 done = bool(terminated[0]) or bool(truncated[0])
                 obs_buf[t] = self.obs
                 act_buf[t] = action.numpy().reshape(-1)
@@ -69,6 +83,8 @@ class EnvWorker:
                     ep_returns.append(ep_return)
                     ep_return = 0.0
                     ep_successes += int(success)
+                    ep_red_first += int(red_first)
+                    ep_blue_only += int(blue_only)
                     ep_count += 1
                     next_obs, _ = self.env.reset()
                 self.obs = flat_obs(next_obs)
@@ -81,12 +97,14 @@ class EnvWorker:
             "final_obs": self.obs.copy(),
             "ep_returns": ep_returns,
             "ep_successes": ep_successes,
+            "ep_red_first": ep_red_first,
+            "ep_blue_only": ep_blue_only,
             "ep_count": ep_count,
         }
 
 
-def worker_main(conn, env_id, seed):
-    worker = EnvWorker(env_id, seed)
+def worker_main(conn, env_id, seed, qpos_noise=0.02):
+    worker = EnvWorker(env_id, seed, qpos_noise)
     while True:
         msg = conn.recv()
         if msg["cmd"] == "rollout":

@@ -10,6 +10,7 @@ from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import sapien_utils
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
+from mani_skill.utils.structs.pose import Pose
 
 
 @register_env("ResetButton-v1", max_episode_steps=100)
@@ -172,3 +173,306 @@ class ResetButtonEnv(BaseEnv):
         self, obs: Any, action: torch.Tensor, info: dict
     ):
         return self.compute_dense_reward(obs, action, info) / self.success_bonus
+
+
+@register_env("ResetButton-v2", max_episode_steps=100)
+class ResetButtonRandomEnv(ResetButtonEnv):
+    button_xy_low = (-0.02, -0.1)
+    button_xy_high = (0.14, 0.1)
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        with torch.device(self.device):
+            b = len(env_idx)
+            low = torch.tensor(self.button_xy_low)
+            high = torch.tensor(self.button_xy_high)
+            xy = low + torch.rand((b, 2)) * (high - low)
+            p = torch.zeros((b, 3))
+            p[:, :2] = xy
+            q = torch.zeros((b, 4))
+            q[:, 0] = 1.0
+            self.button.set_pose(Pose.create_from_pq(p, q))
+        super()._initialize_episode(env_idx, options)
+
+
+@register_env("ResetButton-v3", max_episode_steps=100)
+class ResetButtonFingertipEnv(ResetButtonRandomEnv):
+    centered_radius = 0.04
+
+    def _centered(self):
+        tcp = self.agent.tcp_pose.p
+        root = self.button.pose.p
+        return torch.linalg.norm(tcp[:, :2] - root[:, :2], dim=1) <= self.centered_radius
+
+    def evaluate(self):
+        depression = self._depression()
+        centered = self._centered()
+        return {
+            "success": (depression >= self.trigger_frac * self.travel) & centered,
+            "button_depressed": depression > 1e-4,
+            "centered": centered,
+            "depression": depression,
+        }
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        dist = torch.linalg.norm(self._button_top() - self.agent.tcp_pose.p, axis=1)
+        depression = self._depression()
+        centered = info["centered"].float()
+        reward = self.approach_weight * (self.prev_dist - dist)
+        reward += self.press_weight * (depression - self.prev_depression) * centered
+        reward += self.success_bonus * info["success"].float()
+        if action is not None:
+            reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist.clone()
+        self.prev_depression = depression.clone()
+        return reward
+
+
+@register_env("ResetButton-v4", max_episode_steps=100)
+class ResetButtonPenaltyEnv(ResetButtonFingertipEnv):
+    centered_radius = 0.03
+    bad_press_weight = 6.0
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        dist = torch.linalg.norm(self._button_top() - self.agent.tcp_pose.p, axis=1)
+        depression = self._depression()
+        press_delta = depression - self.prev_depression
+        centered = info["centered"].float()
+        reward = self.approach_weight * (self.prev_dist - dist)
+        reward += self.press_weight * press_delta * centered
+        reward -= self.bad_press_weight * press_delta * (1.0 - centered)
+        reward += self.success_bonus * info["success"].float()
+        if action is not None:
+            reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist.clone()
+        self.prev_depression = depression.clone()
+        return reward
+
+
+@register_env("ResetButton-v5", max_episode_steps=100)
+class ResetButtonJerkEnv(ResetButtonFingertipEnv):
+    jerk_weight = 0.02
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        super()._initialize_episode(env_idx, options)
+        if hasattr(self, "prev_action"):
+            self.prev_action[env_idx] = 0.0
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        if not hasattr(self, "prev_action"):
+            self.prev_action = torch.zeros_like(action)
+        dist = torch.linalg.norm(self._button_top() - self.agent.tcp_pose.p, axis=1)
+        depression = self._depression()
+        centered = info["centered"].float()
+        jerk = ((action - self.prev_action) ** 2).sum(dim=-1)
+        reward = self.approach_weight * (self.prev_dist - dist)
+        reward += self.press_weight * (depression - self.prev_depression) * centered
+        reward += self.success_bonus * info["success"].float()
+        reward -= self.jerk_weight * jerk
+        reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist.clone()
+        self.prev_depression = depression.clone()
+        self.prev_action = action.detach().clone()
+        return reward
+
+
+
+@register_env("ResetButton-v6", max_episode_steps=200)
+class ResetButtonOrderEnv(ResetButtonEnv):
+    button_xy_low = (-0.02, -0.11)
+    button_xy_high = (0.14, 0.11)
+    button_min_sep = 0.15
+    blue_bonus = 20.0
+    red_bonus = 5.0
+    red_approach_weight = 2.0
+    red_approach_weight_after_blue = 5.0
+
+    def _load_scene(self, options: dict):
+        self.table_scene = TableSceneBuilder(
+            self, robot_init_qpos_noise=self.robot_init_qpos_noise
+        )
+        self.table_scene.build()
+        self.button = self._build_button_at(
+            "button_blue", [0.1, 0.35, 0.9, 1], [0.0, -0.11]
+        )
+        self.button_red = self._build_button_at(
+            "button_red", [0.9, 0.15, 0.15, 1], [0.12, 0.11]
+        )
+
+    def _build_button_at(self, name, color, xy):
+        builder = self.scene.create_articulation_builder()
+        builder.set_initial_pose(sapien.Pose(p=[xy[0], xy[1], 0.0]))
+        base = builder.create_link_builder()
+        base.set_name("base")
+        base.add_box_visual(
+            pose=sapien.Pose(p=[0, 0, self.pedestal_half[2]]),
+            half_size=list(self.pedestal_half),
+            material=sapien.render.RenderMaterial(base_color=[0.15, 0.15, 0.17, 1]),
+        )
+        base.add_box_collision(
+            pose=sapien.Pose(p=[0, 0, self.pedestal_half[2]]),
+            half_size=list(self.pedestal_half),
+        )
+        cap = builder.create_link_builder(base)
+        cap.set_name("cap")
+        cap.set_joint_name("button_joint")
+        q = [0.7071068, 0.0, 0.7071068, 0.0]
+        anchor_z = 2 * self.pedestal_half[2] + self.cap_rest_gap
+        cap.set_joint_properties(
+            type="prismatic",
+            limits=[[0.0, self.travel]],
+            pose_in_parent=sapien.Pose(p=[0, 0, anchor_z], q=q),
+            pose_in_child=sapien.Pose(p=[0, 0, -self.cap_half_length], q=q),
+            damping=self.spring_damping,
+        )
+        cap.add_cylinder_visual(
+            pose=sapien.Pose(p=[0, 0, 0]),
+            radius=self.cap_radius,
+            half_length=self.cap_half_length,
+            material=sapien.render.RenderMaterial(base_color=color),
+        )
+        cap.add_cylinder_visual(
+            pose=sapien.Pose(p=[0, 0, -self.cap_half_length - 0.01]),
+            radius=0.02,
+            half_length=0.02,
+            material=sapien.render.RenderMaterial(base_color=[0.3, 0.3, 0.32, 1]),
+        )
+        cap.add_box_collision(
+            pose=sapien.Pose(p=[0, 0, 0]),
+            half_size=[self.cap_radius, self.cap_radius, self.cap_half_length],
+        )
+        button = builder.build(name=name, fix_root_link=True)
+        for joint in button.get_joints():
+            if "prismatic" in joint.type:
+                joint.set_drive_properties(self.spring_stiffness, self.spring_damping)
+                joint.set_drive_target(0.0)
+                joint.set_drive_velocity_target(0.0)
+        return button
+
+    def _depression_red(self):
+        qpos = self.button_red.get_qpos().reshape(self.num_envs, -1)
+        return torch.clamp(qpos[:, 0], 0.0, self.travel)
+
+    def _button_top_red(self):
+        root_p = self.button_red.pose.p
+        top_lift = (
+            2 * self.pedestal_half[2]
+            + self.cap_rest_gap
+            + 2 * self.cap_half_length
+            - self._depression_red()
+        )
+        return torch.stack(
+            [root_p[:, 0], root_p[:, 1], root_p[:, 2] + top_lift], dim=1
+        )
+
+    def _sample_layout(self, b):
+        low = torch.tensor(self.button_xy_low)
+        high = torch.tensor(self.button_xy_high)
+        corners = torch.tensor(
+            [
+                [low[0], low[1]],
+                [low[0], high[1]],
+                [high[0], low[1]],
+                [high[0], high[1]],
+            ]
+        )
+        blue = low + torch.rand((b, 2)) * (high - low)
+        red = low + torch.rand((b, 2)) * (high - low)
+        for i in range(b):
+            for _ in range(500):
+                if torch.linalg.norm(blue[i] - red[i]) >= self.button_min_sep:
+                    break
+                red[i] = low + torch.rand(2) * (high - low)
+            if torch.linalg.norm(blue[i] - red[i]) < self.button_min_sep:
+                red[i] = corners[torch.argmax(torch.linalg.norm(corners - blue[i], dim=1))]
+        return blue, red
+
+    def _set_pose_xy(self, articulation, env_idx, xy):
+        raw = articulation.pose.raw_pose.clone()
+        raw[env_idx, 0] = xy[:, 0].to(raw.dtype)
+        raw[env_idx, 1] = xy[:, 1].to(raw.dtype)
+        raw[env_idx, 2] = 0.0
+        raw[env_idx, 3] = 1.0
+        raw[env_idx, 4] = 0.0
+        raw[env_idx, 5] = 0.0
+        raw[env_idx, 6] = 0.0
+        articulation.set_pose(Pose.create_from_pq(raw[:, :3], raw[:, 3:]))
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        with torch.device(self.device):
+            b = len(env_idx)
+            self.table_scene.initialize(env_idx)
+            blue, red = self._sample_layout(b)
+            self._set_pose_xy(self.button, env_idx, blue)
+            self._set_pose_xy(self.button_red, env_idx, red)
+            self.button.set_qpos(torch.zeros((b, 1), device=self.device))
+            self.button_red.set_qpos(torch.zeros((b, 1), device=self.device))
+        dist_blue = torch.linalg.norm(
+            self._button_top() - self.agent.tcp_pose.p, axis=1
+        )
+        dist_red = torch.linalg.norm(
+            self._button_top_red() - self.agent.tcp_pose.p, axis=1
+        )
+        if not hasattr(self, "prev_dist"):
+            self.prev_dist = dist_blue.clone()
+            self.prev_dist_red = dist_red.clone()
+            self._blue_pressed = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+            self._red_pressed = self._blue_pressed.clone()
+        self.prev_dist[env_idx] = dist_blue[env_idx].clone()
+        self.prev_dist_red[env_idx] = dist_red[env_idx].clone()
+        self._blue_pressed[env_idx] = False
+        self._red_pressed[env_idx] = False
+
+    def evaluate(self):
+        dep_blue = self._depression()
+        dep_red = self._depression_red()
+        blue_now = dep_blue >= self.trigger_frac * self.travel
+        red_now = dep_red >= self.trigger_frac * self.travel
+        blue_done = self._blue_pressed
+        newly_blue = blue_now & ~blue_done
+        newly_red = red_now & ~self._red_pressed
+        order_success = red_now & blue_done
+        red_first = red_now & ~blue_done
+        self._blue_pressed = blue_done | blue_now
+        self._red_pressed = self._red_pressed | red_now
+        return {
+            "success": red_now,
+            "order_success": order_success,
+            "red_first": red_first,
+            "newly_blue": newly_blue,
+            "newly_red": newly_red,
+            "blue_now": blue_now,
+            "red_now": red_now,
+            "blue_done": blue_done,
+        }
+
+    def _get_obs_extra(self, info: dict):
+        tcp = self.agent.tcp_pose.p
+        return dict(
+            tcp_to_blue=self._button_top() - tcp,
+            tcp_to_red=self._button_top_red() - tcp,
+            dep_blue=(self._depression() / self.travel).unsqueeze(-1),
+            dep_red=(self._depression_red() / self.travel).unsqueeze(-1),
+            blue_done=self._blue_pressed.float().unsqueeze(-1),
+        )
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        tcp = self.agent.tcp_pose.p
+        dist_blue = torch.linalg.norm(self._button_top() - tcp, axis=1)
+        dist_red = torch.linalg.norm(self._button_top_red() - tcp, axis=1)
+        blue_done = info["blue_done"]
+        reward = self.approach_weight * (self.prev_dist - dist_blue)
+        red_weight = torch.where(
+            blue_done,
+            torch.full_like(dist_red, self.red_approach_weight_after_blue),
+            torch.full_like(dist_red, self.red_approach_weight),
+        )
+        reward += red_weight * (self.prev_dist_red - dist_red)
+        reward += self.blue_bonus * info["newly_blue"].float()
+        reward += self.red_bonus * info["newly_red"].float()
+        if action is not None:
+            reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist_blue.clone()
+        self.prev_dist_red = dist_red.clone()
+        return reward

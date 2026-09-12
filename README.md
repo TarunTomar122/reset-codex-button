@@ -63,6 +63,16 @@ Design traps encountered (worth remembering):
 - With the cap too high, simply closing the gripper pinches the cap and "wins" without moving the arm — a reward hack.
 - Spring stiffness must be strong enough to hold the cap's weight (sag ≪ travel) but weak enough for the arm to press.
 
+## Two-button order task (`ResetButton-v6`)
+
+Two buttons with **randomized positions** every episode. The task: press **blue first, then red**. Red ends the episode. The reward never mentions order — it's a staged design: approach blue ×5 / red ×2 before blue is pressed; after blue, blue ×0 / red ×5 (goals shift); +20 for the first blue press, +5 for the first red press, sizes penalized. Because red ends the episode, pressing red first forfeits the blue jackpot.
+
+Result after 2M steps / 28 min on the M1 Max (8 workers, ~4 GB RAM): deterministic order success **~60–75%** on random layouts, with red-first mistakes dropping from ~50% (random policy) to **~10–20%**, and occasional "blue then timeout" episodes. Order preference emerged from the reward structure, but a red-first local optimum (+5 and done) isn't fully escaped.
+
+![two-button order policy](media/order_policy.gif)
+
+Full-quality video: [order policy (mp4)](media/order_policy.mp4) · oracle validation: `scripts/check_order_reach.py` (25/25 random layouts)
+
 ## Training (PPO from scratch)
 
 `train.py` + `rl/` implement PPO (clipped objective, GAE, 2x128 MLP Gaussian policy, value baseline) with 8 parallel CPU env workers over pipes, thread pinning, a RAM cap, checkpointing, and periodic evaluation.

@@ -40,6 +40,8 @@ def parse_args():
     p.add_argument("--eval-every", type=int, default=10)
     p.add_argument("--eval-episodes", type=int, default=20)
     p.add_argument("--max-mem-gb", type=float, default=20.0)
+    p.add_argument("--qpos-noise", type=float, default=0.02)
+    p.add_argument("--stop-at-success", type=float, default=1.01)
     p.add_argument("--snapshot-iters", default="")
     p.add_argument("--output-dir", default="outputs")
     return p.parse_args()
@@ -79,6 +81,8 @@ def save_checkpoint(path, policy, value, iteration, steps, args, obs_dim, act_di
 def evaluate(env, policy, episodes):
     policy.eval()
     successes = 0
+    red_firsts = 0
+    blue_onlys = 0
     returns = []
     lengths = []
     for _ in range(episodes):
@@ -87,6 +91,7 @@ def evaluate(env, policy, episodes):
         ep_return = 0.0
         steps = 0
         info = {}
+        truncated = [False]
         while not done:
             with torch.no_grad():
                 mean, _ = policy(torch.from_numpy(flat_obs(obs)).unsqueeze(0))
@@ -95,11 +100,26 @@ def evaluate(env, policy, episodes):
             ep_return += float(reward[0])
             steps += 1
             done = bool(terminated[0]) or bool(truncated[0])
-        successes += int(bool(info["success"][0]))
+        if "order_success" in info:
+            successes += int(bool(info["order_success"][0]))
+            red_firsts += int(bool(info["red_first"][0]))
+            blue_onlys += int(
+                bool(truncated[0])
+                and bool(info["blue_done"][0])
+                and not bool(info["red_now"][0])
+            )
+        else:
+            successes += int(bool(info["success"][0]))
         returns.append(ep_return)
         lengths.append(steps)
     policy.train()
-    return successes / episodes, float(np.mean(returns)), float(np.mean(lengths))
+    return (
+        successes / episodes,
+        float(np.mean(returns)),
+        float(np.mean(lengths)),
+        red_firsts / episodes,
+        blue_onlys / episodes,
+    )
 
 
 def compute_gae(batches, value, args):
@@ -151,6 +171,7 @@ def main():
         num_envs=1,
         sim_backend="cpu",
         render_mode=None,
+        robot_init_qpos_noise=args.qpos_noise,
     )
     obs, _ = eval_env.reset(seed=args.seed)
     obs_dim = flat_obs(obs).shape[0]
@@ -168,7 +189,7 @@ def main():
         parent_conn, child_conn = ctx.Pipe()
         proc = ctx.Process(
             target=worker_main,
-            args=(child_conn, args.env_id, args.seed * 1000 + i),
+            args=(child_conn, args.env_id, args.seed * 1000 + i, args.qpos_noise),
             daemon=True,
         )
         proc.start()
@@ -189,7 +210,11 @@ def main():
             "steps",
             "mean_return",
             "worker_success",
+            "worker_red_first",
+            "worker_blue_only",
             "eval_success",
+            "eval_red_first",
+            "eval_blue_only",
             "eval_return",
             "eval_length",
             "policy_loss",
@@ -255,14 +280,24 @@ def main():
             ep_returns = [r for b in batches for r in b["ep_returns"]]
             ep_count = sum(b["ep_count"] for b in batches)
             ep_successes = sum(b["ep_successes"] for b in batches)
+            ep_red_first = sum(b.get("ep_red_first", 0) for b in batches)
+            ep_blue_only = sum(b.get("ep_blue_only", 0) for b in batches)
             mean_return = float(np.mean(ep_returns)) if ep_returns else float("nan")
             worker_success = ep_successes / ep_count if ep_count else float("nan")
+            worker_red_first = ep_red_first / ep_count if ep_count else float("nan")
+            worker_blue_only = ep_blue_only / ep_count if ep_count else float("nan")
 
             eval_success = eval_return = eval_length = float("nan")
+            eval_red_first = eval_blue_only = float("nan")
+            stop_now = False
             if it % args.eval_every == 0 or it == 1:
-                eval_success, eval_return, eval_length = evaluate(
-                    eval_env, policy, args.eval_episodes
-                )
+                (
+                    eval_success,
+                    eval_return,
+                    eval_length,
+                    eval_red_first,
+                    eval_blue_only,
+                ) = evaluate(eval_env, policy, args.eval_episodes)
                 if eval_success > best_success:
                     best_success = eval_success
                     save_checkpoint(
@@ -275,6 +310,12 @@ def main():
                         obs_dim,
                         act_dim,
                     )
+                if eval_success >= args.stop_at_success:
+                    print(
+                        f"reached eval success {eval_success:.2f}, stopping early",
+                        flush=True,
+                    )
+                    stop_now = True
 
             rss = total_rss_gb(pids + [os.getpid()])
             sps = steps_per_iter / (time.time() - t_iter)
@@ -305,7 +346,11 @@ def main():
                     total_steps,
                     f"{mean_return:.2f}",
                     f"{worker_success:.3f}",
+                    f"{worker_red_first:.3f}",
+                    f"{worker_blue_only:.3f}",
                     f"{eval_success:.3f}",
+                    f"{eval_red_first:.3f}",
+                    f"{eval_blue_only:.3f}",
                     f"{eval_return:.2f}",
                     f"{eval_length:.1f}",
                     f"{np.mean(policy_losses):.4f}",
@@ -322,7 +367,8 @@ def main():
                 print(
                     f"it={it:5d} steps={total_steps:8d} "
                     f"return={mean_return:7.2f} worker_succ={worker_success:5.2f} "
-                    f"eval_succ={eval_success:5.2f} ent={np.mean(entropies):6.3f} "
+                    f"red_first={worker_red_first:5.2f} eval_succ={eval_success:5.2f} "
+                    f"ent={np.mean(entropies):6.3f} "
                     f"vf={np.mean(value_losses):7.3f} rss={rss:4.1f}GB sps={sps:5.0f}",
                     flush=True,
                 )
@@ -332,6 +378,8 @@ def main():
                     f"memory {rss:.1f}GB exceeded cap {args.max_mem_gb}GB, stopping",
                     flush=True,
                 )
+                break
+            if stop_now:
                 break
     except KeyboardInterrupt:
         print("interrupted, saving checkpoint", flush=True)

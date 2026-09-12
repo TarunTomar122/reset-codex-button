@@ -634,3 +634,8 @@ class ResetButtonStrongCurriculumEnv(ResetButtonCurriculumEnv):
     blue_start_frac = 0.7
     red_approach_weight_after_blue = 12.0
     press_shaping_weight = 6.0
+
+
+@register_env("ResetButton-v12", max_episode_steps=250)
+class ResetButtonBalancedCurriculumEnv(ResetButtonStrongCurriculumEnv):
+    blue_start_frac = 0.5

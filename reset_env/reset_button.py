@@ -505,3 +505,132 @@ class ResetButtonStrictOrderEnv(ResetButtonOrderEnv):
         self.prev_dist = dist_blue.clone()
         self.prev_dist_red = dist_red.clone()
         return reward
+
+
+@register_env("ResetButton-v8", max_episode_steps=200)
+class ResetButtonFingertipOrderEnv(ResetButtonStrictOrderEnv):
+    centered_radius = 0.04
+
+    def _centered_blue(self):
+        tcp = self.agent.tcp_pose.p
+        root = self.button.pose.p
+        return torch.linalg.norm(tcp[:, :2] - root[:, :2], dim=1) <= self.centered_radius
+
+    def _centered_red(self):
+        tcp = self.agent.tcp_pose.p
+        root = self.button_red.pose.p
+        return torch.linalg.norm(tcp[:, :2] - root[:, :2], dim=1) <= self.centered_radius
+
+    def evaluate(self):
+        dep_blue = self._depression()
+        dep_red = self._depression_red()
+        centered_blue = self._centered_blue()
+        centered_red = self._centered_red()
+        blue_now = (dep_blue >= self.trigger_frac * self.travel) & centered_blue
+        red_now = (dep_red >= self.trigger_frac * self.travel) & centered_red
+        blue_done = self._blue_pressed
+        newly_blue = blue_now & ~blue_done
+        newly_red = red_now & ~self._red_pressed
+        order_success = red_now & blue_done
+        red_first = red_now & ~blue_done
+        self._blue_pressed = blue_done | blue_now
+        self._red_pressed = self._red_pressed | red_now
+        return {
+            "success": red_now,
+            "order_success": order_success,
+            "red_first": red_first,
+            "newly_blue": newly_blue,
+            "newly_red": newly_red,
+            "blue_now": blue_now,
+            "red_now": red_now,
+            "blue_done": blue_done,
+            "centered_blue": centered_blue,
+            "centered_red": centered_red,
+        }
+
+
+@register_env("ResetButton-v9", max_episode_steps=250)
+class ResetButtonStagedFingertipOrderEnv(ResetButtonFingertipOrderEnv):
+    press_shaping_weight = 2.0
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        super()._initialize_episode(env_idx, options)
+        if hasattr(self, "prev_dep_blue"):
+            self.prev_dep_blue[env_idx] = self._depression()[env_idx].detach()
+            self.prev_dep_red[env_idx] = self._depression_red()[env_idx].detach()
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        if not hasattr(self, "prev_dep_blue"):
+            self.prev_dep_blue = self._depression().detach().clone()
+            self.prev_dep_red = self._depression_red().detach().clone()
+        tcp = self.agent.tcp_pose.p
+        dist_blue = torch.linalg.norm(self._button_top() - tcp, axis=1)
+        dist_red = torch.linalg.norm(self._button_top_red() - tcp, axis=1)
+        blue_done = info["blue_done"]
+        dep_blue = self._depression()
+        dep_red = self._depression_red()
+        centered_blue = info["centered_blue"].float()
+        centered_red = info["centered_red"].float()
+        blue_weight = torch.where(
+            blue_done, torch.zeros_like(dist_blue), torch.full_like(dist_blue, self.approach_weight)
+        )
+        red_weight = torch.where(
+            blue_done,
+            torch.full_like(dist_red, self.red_approach_weight_after_blue),
+            torch.full_like(dist_red, self.red_approach_weight),
+        )
+        reward = blue_weight * (self.prev_dist - dist_blue)
+        reward += red_weight * (self.prev_dist_red - dist_red)
+        reward += (
+            self.press_shaping_weight
+            * (dep_blue - self.prev_dep_blue)
+            * centered_blue
+            * (~blue_done).float()
+        )
+        reward += (
+            self.press_shaping_weight
+            * (dep_red - self.prev_dep_red)
+            * centered_red
+            * blue_done.float()
+        )
+        reward += self.blue_bonus * info["newly_blue"].float()
+        reward += (
+            self.red_bonus * info["newly_red"].float() * info["blue_done"].float()
+        )
+        if action is not None:
+            reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist_blue.clone()
+        self.prev_dist_red = dist_red.clone()
+        self.prev_dep_blue = dep_blue.detach().clone()
+        self.prev_dep_red = dep_red.detach().clone()
+        return reward
+
+
+@register_env("ResetButton-v10", max_episode_steps=250)
+class ResetButtonCurriculumEnv(ResetButtonStagedFingertipOrderEnv):
+    centered_radius = 0.05
+    red_approach_weight_after_blue = 10.0
+    press_shaping_weight = 4.0
+    blue_start_frac = 0.3
+
+    def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        super()._initialize_episode(env_idx, options)
+        b = len(env_idx)
+        start_blue = torch.rand(b) < self.blue_start_frac
+        if start_blue.any():
+            idx = env_idx[start_blue]
+            qpos = self.button.get_qpos().clone()
+            qpos[idx] = 0.015
+            self.button.set_qpos(qpos)
+            self._blue_pressed[idx] = True
+            if not hasattr(self, "prev_dep_blue"):
+                self.prev_dep_blue = self._depression().detach().clone()
+                self.prev_dep_red = self._depression_red().detach().clone()
+            self.prev_dep_blue[idx] = self._depression()[idx].detach()
+
+
+@register_env("ResetButton-v11", max_episode_steps=250)
+class ResetButtonStrongCurriculumEnv(ResetButtonCurriculumEnv):
+    blue_start_frac = 0.7
+    red_approach_weight_after_blue = 12.0
+    press_shaping_weight = 6.0

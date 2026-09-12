@@ -86,6 +86,22 @@ Removing the red-first payout improved order compliance; the main remaining fail
 
 Full-quality video: [order policy (mp4)](media/order_strict_policy.mp4) · oracle validation: `scripts/check_order_reach.py` (25/25 random layouts) · breakdown: `scripts/order_report.py`
 
+### Fingertip-only order task (`v8`–`v11`)
+
+Presses only count when the TCP (the point between the fingertips) is within a few cm of the cap — so both buttons must be pressed with the fingertip, not the wrist or forearm.
+
+Iteration log, each trained 2.5–3M steps:
+- **v8** (gate only): stalled — learned to press blue and never red (blue-then-timeout 67–100%).
+- **v9** (proper staged weights + gated press shaping + 250-step episodes): still stalled at red. Rollouts showed the arm pressing red **off-center with the wrist**, which the gate correctly rejected; the policy had no gradient to re-aim.
+- **v10** (30% curriculum — episodes start with blue already pressed — wider gate, stronger red pull): stage 2 learned, plateaued around 0.10–0.20 eval.
+- **v11** (70% curriculum, red pull ×12): **66% order success** (50 seeded episodes), 0 blue-then-timeout, but **30–40% of episodes never press blue** — the heavy curriculum caused stage-1 forgetting.
+
+Trade-off learned: curriculum fixed the second stage but eroded the first; failures are now "never pressed blue" rather than wrong order or sloppy presses. Every successful episode uses the fingertips (guaranteed by the gate).
+
+![fingertip-only order policy](media/finger_order_policy.gif)
+
+Full-quality video: [fingertip order policy (mp4)](media/finger_order_policy.mp4)
+
 ## Training (PPO from scratch)
 
 `train.py` + `rl/` implement PPO (clipped objective, GAE, 2x128 MLP Gaussian policy, value baseline) with 8 parallel CPU env workers over pipes, thread pinning, a RAM cap, checkpointing, and periodic evaluation.

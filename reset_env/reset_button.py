@@ -476,3 +476,32 @@ class ResetButtonOrderEnv(ResetButtonEnv):
         self.prev_dist = dist_blue.clone()
         self.prev_dist_red = dist_red.clone()
         return reward
+
+
+@register_env("ResetButton-v7", max_episode_steps=200)
+class ResetButtonStrictOrderEnv(ResetButtonOrderEnv):
+    button_min_sep = 0.18
+
+    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        tcp = self.agent.tcp_pose.p
+        dist_blue = torch.linalg.norm(self._button_top() - tcp, axis=1)
+        dist_red = torch.linalg.norm(self._button_top_red() - tcp, axis=1)
+        blue_done = info["blue_done"]
+        reward = self.approach_weight * (self.prev_dist - dist_blue)
+        red_weight = torch.where(
+            blue_done,
+            torch.full_like(dist_red, self.red_approach_weight_after_blue),
+            torch.full_like(dist_red, self.red_approach_weight),
+        )
+        reward += red_weight * (self.prev_dist_red - dist_red)
+        reward += self.blue_bonus * info["newly_blue"].float()
+        reward += (
+            self.red_bonus
+            * info["newly_red"].float()
+            * info["blue_done"].float()
+        )
+        if action is not None:
+            reward -= self.action_penalty * (action**2).sum(dim=-1)
+        self.prev_dist = dist_blue.clone()
+        self.prev_dist_red = dist_red.clone()
+        return reward

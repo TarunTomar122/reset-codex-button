@@ -17,13 +17,14 @@ import reset_env  # noqa: F401
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--env-id", default="ResetButton-v6")
     p.add_argument("--episodes", type=int, default=25)
     p.add_argument("--max-steps", type=int, default=200)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     env = gym.make(
-        "ResetButton-v6",
+        args.env_id,
         obs_mode="state",
         num_envs=1,
         sim_backend="cpu",

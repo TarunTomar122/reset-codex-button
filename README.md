@@ -63,15 +63,28 @@ Design traps encountered (worth remembering):
 - With the cap too high, simply closing the gripper pinches the cap and "wins" without moving the arm — a reward hack.
 - Spring stiffness must be strong enough to hold the cap's weight (sag ≪ travel) but weak enough for the arm to press.
 
-## Two-button order task (`ResetButton-v6`)
+## Two-button order task (`ResetButton-v6` / `v7`)
 
-Two buttons with **randomized positions** every episode. The task: press **blue first, then red**. Red ends the episode. The reward never mentions order — it's a staged design: approach blue ×5 / red ×2 before blue is pressed; after blue, blue ×0 / red ×5 (goals shift); +20 for the first blue press, +5 for the first red press, sizes penalized. Because red ends the episode, pressing red first forfeits the blue jackpot.
+Two buttons with **randomized positions** every episode. The task: press **blue first, then red**. Red ends the episode. The reward never mentions order — it's a staged design: approach blue ×5 / red ×2 before blue is pressed; after blue, blue ×0 / red ×5 (goals shift); +20 for the first blue press; sizes penalized. Because red ends the episode, pressing red first forfeits the blue jackpot.
 
-Result after 2M steps / 28 min on the M1 Max (8 workers, ~4 GB RAM): deterministic order success **~60–75%** on random layouts, with red-first mistakes dropping from ~50% (random policy) to **~10–20%**, and occasional "blue then timeout" episodes. Order preference emerged from the reward structure, but a red-first local optimum (+5 and done) isn't fully escaped.
+Ablation:
+- **v6** — red-first still pays +5 (the original design), min spacing 0.15 m.
+- **v7** — red-first pays 0, min spacing 0.18 m so the arm can't clip both buttons in passing.
 
-![two-button order policy](media/order_policy.gif)
+Results after 2M steps each on the M1 Max (8 workers, ~4.6 GB RAM). Deterministic, 50 seeded episodes at ±0.3 start noise:
 
-Full-quality video: [order policy (mp4)](media/order_policy.mp4) · oracle validation: `scripts/check_order_reach.py` (25/25 random layouts)
+| | v6 | v7 |
+|---|---|---|
+| order success | 60% | **70%** |
+| red-first | 20% | 12% |
+| blue then timeout | 12% | 14% |
+| mean steps (success) | — | 32.6 |
+
+Removing the red-first payout improved order compliance; the main remaining failure mode is running out of the 200-step limit after pressing blue when buttons are far apart. Order preference emerged from reward structure alone — it was never written down.
+
+![two-button order policy](media/order_strict_policy.gif)
+
+Full-quality video: [order policy (mp4)](media/order_strict_policy.mp4) · oracle validation: `scripts/check_order_reach.py` (25/25 random layouts) · breakdown: `scripts/order_report.py`
 
 ## Training (PPO from scratch)
 
